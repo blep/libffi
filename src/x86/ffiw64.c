@@ -107,6 +107,9 @@ EFI64(ffi_prep_cif_machdep)(ffi_cif *cif)
   return FFI_OK;
 }
 
+#ifdef _MSC_VER
+#pragma runtime_checks( "", off ) /* work-around RTC stack check triggering on alloca() */
+#endif
 static void
 ffi_call_int (ffi_cif *cif, void (*fn)(void), void *rvalue,
 	      void **avalue, void *closure)
@@ -171,6 +174,9 @@ ffi_call_int (ffi_cif *cif, void (*fn)(void), void *rvalue,
 
   ffi_call_win64 (stack, frame, closure);
 }
+#ifdef _MSC_VER
+#pragma runtime_checks( "", restore )
+#endif
 
 void
 EFI64(ffi_call)(ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue)
