@@ -47,40 +47,53 @@
 
 	; SEH(.safesh ffi_call_win64)
 C(ffi_call_win64) proc SEH(frame)
+; Input parameters:
+; RCX: stack   (macro arg0), alloca of cif->bytes + sizeof(struct win64_call_frame) + rsize
+; RDX: frame   (macro arg1)
+; R8:  closure (macro arg2), null on standard function call
+; struct win64_call_frame:
+;   UINT64 rbp;		/* 0 */
+;   UINT64 retaddr;	/* 8 */
+;   UINT64 fn;		/* 16 */
+;   UINT64 flags;	/* 24 */
+;   UINT64 rvalue;	/* 32 */
+
 	cfi_startproc
 	/* Set up the local stack frame and install it in rbp/rsp.  */
-	mov	RAX, [RSP] ; 	movq	(%rsp), %rax
-	mov [arg1], RBP ; movq	%rbp, (arg1)
-	mov [arg1 + 8], RAX;	movq	%rax, 8(arg1)
-	mov	 RBP, arg1; movq	arg1, %rbp
+	mov	RAX, [RSP] 
+	mov [arg1], RBP         ; frame->rbp = RBP
+	mov [arg1 + 8], RAX     ; frame->retaddr = [RSP]
+	mov	 RBP, arg1          ; RBP = frame
 	cfi_def_cfa(rbp, 16)
 	cfi_rel_offset(rbp, 0)
 	SEH(.pushreg rbp)
 	SEH(.setframe rbp, 0)
 	SEH(.endprolog)
-	mov	RSP, arg0 ;	movq	arg0, %rsp
+	mov	RSP, arg0           ; RSP = stack (RCX)
 
-	mov	R10, arg2 ; movq	arg2, %r10
+	mov	R10, arg2           ; R10 = closure (R8)
 
 	/* Load all slots into both general and xmm registers.  */
-	mov	RCX, [RSP] ;	movq	(%rsp), %rcx
-	movsd XMM0, qword ptr [RSP] ; movsd	(%rsp), %xmm0
-	mov	RDX, [RSP + 8] ;movq	8(%rsp), %rdx
-	movsd XMM1, qword ptr [RSP + 8];	movsd	8(%rsp), %xmm1
-	mov R8, [RSP + 16] ; movq	16(%rsp), %r8
-	movsd	XMM2, qword ptr [RSP + 16] ; movsd	16(%rsp), %xmm2
-	mov	R9, [RSP + 24] ; movq	24(%rsp), %r9
-	movsd	XMM3, qword ptr [RSP + 24] ;movsd	24(%rsp), %xmm3
+	mov	RCX, [RSP]                      ; RCX = stack[0]   (param #0 of called function)
+	movsd XMM0, qword ptr [RSP]         ; XMM0 = stack[0]  (param #0 of called function)
+	mov	RDX, [RSP + 8]                  ; RDX = stack[1]   (param #1 of called function)
+	movsd XMM1, qword ptr [RSP + 8]     ; XMM1 = stack[1]  (param #1 of called function)
+	mov R8, [RSP + 16]                  ; R8 = stack[2]    (param #2 of called function)
+	movsd	XMM2, qword ptr [RSP + 16]  ; XMM2 = stack[2]  (param #2 of called function)
+	mov	R9, [RSP + 24]                  ; R9 = stack[0]    (param #3 of called function)
+	movsd	XMM3, qword ptr [RSP + 24]  ; XMM3 = stack[0]  (param #3 of called function)
 
-	CALL qword ptr [RBP + 16] ; call	*16(%rbp)
+	CALL qword ptr [RBP + 16]           ; (*(frame->fn))(...)
 
-	mov	 ECX, [RBP + 24] ; movl	24(%rbp), %ecx
-	mov	R8, [RBP + 32] ; movq	32(%rbp), %r8
-	LEA	R10, ffi_call_win64_tab ; leaq	0f(%rip), %r10
-	CMP	ECX, FFI_TYPE_SMALL_STRUCT_4B ; cmpl	$FFI_TYPE_SMALL_STRUCT_4B, %ecx
-	LEA	R10, [R10 + RCX*8] ; leaq	(%r10, %rcx, 8), %r10
-	JA	L99 ; ja	99f
-	JMP	R10 ; jmp	*%r10
+	mov	 ECX, [RBP + 24]                ; ECX = frame->flags
+	mov	R8, [RBP + 32]                  ; R8 = frame->rvalue
+	LEA	R10, ffi_call_win64_tab         ; R10 = ffi_call_win64_tab
+	CMP	ECX, FFI_TYPE_SMALL_STRUCT_4B   ; if frame->flags > FFI_TYPE_SMALL_STRUCT_4B
+	LEA	R10, [R10 + RCX*8]              ; R10 = ffi_call_win64_tab + frame->flags * 8
+	JA	L99                             ; jump to L99 if frame->flags > FFI_TYPE_SMALL_STRUCT_4B
+                                        ; jump to the code for handling the specific return type
+                                        ; Each return type is handled in <= 8 bytes of assembly
+	JMP	R10                             ; jmp *%r10
 
 /* Below, we're space constrained most of the time.  Thus we eschew the
    modern "mov, pop, ret" sequence (5 bytes) for "leave, ret" (2 bytes).  */
@@ -98,61 +111,55 @@ ffi_call_win64_tab LABEL NEAR
 E(0b, FFI_TYPE_VOID)
 	epilogue
 E(0b, FFI_TYPE_INT)
-	movsxd rax, eax ; movslq	%eax, %rax
-	mov qword ptr [r8], rax; movq	%rax, (%r8)
+    mov dword ptr [r8], eax     
 	epilogue
 E(0b, FFI_TYPE_FLOAT)
-	movss dword ptr [r8], xmm0 ; movss	%xmm0, (%r8)
+	movss dword ptr [r8], xmm0 
 	epilogue
 E(0b, FFI_TYPE_DOUBLE)
-	movsd qword ptr[r8], xmm0; movsd	%xmm0, (%r8)
+	movsd qword ptr[r8], xmm0
 	epilogue
 E(0b, FFI_TYPE_LONGDOUBLE)
 	call	PLT(C(abort))
 E(0b, FFI_TYPE_UINT8)
-	movzx eax, al ;movzbl	%al, %eax
-	mov qword ptr[r8], rax; movq	%rax, (%r8)
+	mov byte ptr [r8], al 
 	epilogue
 E(0b, FFI_TYPE_SINT8)
-	movsx rax, al ; movsbq	%al, %rax
-	jmp	L98
+	mov byte ptr [r8], al 
+	epilogue
 E(0b, FFI_TYPE_UINT16)
-	movzx eax, ax ; movzwl	%ax, %eax
-	mov qword ptr[r8], rax; movq	%rax, (%r8)
+	mov word ptr [r8], ax 
 	epilogue
 E(0b, FFI_TYPE_SINT16)
-	movsx rax, ax; movswq	%ax, %rax
-	jmp	L98
+	mov word ptr [r8], ax 
+	epilogue
 E(0b, FFI_TYPE_UINT32)
-	mov eax, eax; movl	%eax, %eax
-	mov qword ptr[r8], rax ; movq	%rax, (%r8)
+    mov dword ptr [r8], eax     
 	epilogue
 E(0b, FFI_TYPE_SINT32)
-	movsxd rax, eax; movslq	%eax, %rax
-	mov qword ptr [r8], rax; movq	%rax, (%r8)
+    mov dword ptr [r8], eax     
 	epilogue
 E(0b, FFI_TYPE_UINT64)
-L98 LABEL near
-	mov qword ptr [r8], rax ; movq	%rax, (%r8)
+	mov qword ptr [r8], rax 
 	epilogue
 E(0b, FFI_TYPE_SINT64)
-	mov qword ptr [r8], rax;movq	%rax, (%r8)
+	mov qword ptr [r8], rax
 	epilogue
 E(0b, FFI_TYPE_STRUCT)
 	epilogue
 E(0b, FFI_TYPE_POINTER)
-	mov qword ptr [r8], rax ;movq	%rax, (%r8)
+	mov qword ptr [r8], rax 
 	epilogue
 E(0b, FFI_TYPE_COMPLEX)
 	call	PLT(C(abort))
 E(0b, FFI_TYPE_SMALL_STRUCT_1B)
-	mov byte ptr [r8], al ; movb	%al, (%r8)
+	mov byte ptr [r8], al 
 	epilogue
 E(0b, FFI_TYPE_SMALL_STRUCT_2B)
-	mov word ptr [r8], ax ; movw	%ax, (%r8)
+	mov word ptr [r8], ax 
 	epilogue
 E(0b, FFI_TYPE_SMALL_STRUCT_4B)
-	mov dword ptr [r8], eax ; movl	%eax, (%r8)
+	mov dword ptr [r8], eax 
 	epilogue
 
 	align	8
